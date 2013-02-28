@@ -8,6 +8,7 @@ WriteMakefile
   'PREREQ_PM' => {
                    'Catmandu' => '0.03',
                    'Dancer' => '1.3',
+                   'DateTime' => 0,
                    'Software::License' => 0,
                    'Test::Exception' => 0,
                    'Test::More' => 0
