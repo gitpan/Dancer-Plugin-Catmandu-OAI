@@ -38,7 +38,7 @@
    "provides" : {
       "Dancer::Plugin::Catmandu::OAI" : {
          "file" : "lib/Dancer/Plugin/Catmandu/OAI.pm",
-         "version" : "0.0301"
+         "version" : "0.0302"
       }
    },
    "release_status" : "stable",
@@ -47,5 +47,5 @@
          "http://dev.perl.org/licenses/"
       ]
    },
-   "version" : "0.0301"
+   "version" : "0.0302"
 }

@@ -18,7 +18,7 @@ name: Dancer-Plugin-Catmandu-OAI
 provides:
   Dancer::Plugin::Catmandu::OAI:
     file: lib/Dancer/Plugin/Catmandu/OAI.pm
-    version: 0.0301
+    version: 0.0302
 requires:
   Catmandu: 0.03
   Dancer: 1.3
@@ -26,4 +26,4 @@ requires:
   perl: v5.10.1
 resources:
   license: http://dev.perl.org/licenses/
-version: 0.0301
+version: 0.0302
