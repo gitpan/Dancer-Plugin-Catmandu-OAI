@@ -5,7 +5,7 @@
       "Nicolas Franck <nicolas.franck@ugent.be>"
    ],
    "dynamic_config" : 1,
-   "generated_by" : "Module::Build version 0.4203",
+   "generated_by" : "Module::Build version 0.4205",
    "license" : [
       "perl_5"
    ],
@@ -30,6 +30,7 @@
       "runtime" : {
          "requires" : {
             "Catmandu" : "0.8013",
+            "Catmandu::Exporter::Template" : "0.002000",
             "Clone" : "0",
             "Dancer" : "1.3121",
             "DateTime" : "0",
@@ -40,7 +41,7 @@
    "provides" : {
       "Dancer::Plugin::Catmandu::OAI" : {
          "file" : "lib/Dancer/Plugin/Catmandu/OAI.pm",
-         "version" : "0.0303"
+         "version" : "0.0304"
       }
    },
    "release_status" : "stable",
@@ -49,5 +50,5 @@
          "http://dev.perl.org/licenses/"
       ]
    },
-   "version" : "0.0303"
+   "version" : "0.0304"
 }
