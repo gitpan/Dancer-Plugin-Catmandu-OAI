@@ -4,13 +4,9 @@ package Dancer::Plugin::Catmandu::OAI; # TODO hierarchical sets, setDescription
 
 Dancer::Plugin::Catmandu::OAI - OAI-PMH provider backed by a searchable Catmandu::Store
 
-=head1 VERSION
-
-Version 0.0304
-
 =cut
 
-our $VERSION = '0.0304';
+our $VERSION = '0.0305';
 
 use Catmandu::Sane;
 use Catmandu::Util qw(:is);
@@ -20,6 +16,7 @@ use Catmandu::Exporter::Template;
 use Dancer::Plugin;
 use Dancer qw(:syntax);
 use DateTime;
+use DateTime::Format::Strptime;
 use Clone qw(clone);
 
 my $DEFAULT_LIMIT = 100;
@@ -51,6 +48,20 @@ my $VERBS = {
     },
 };
 
+sub parse_oai_datestamp {
+    my ($date) = @_;
+    my @d = $date =~ /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})Z$/;
+    DateTime->new(
+        year      => $d[0],
+        month     => $d[1],
+        day       => $d[2],
+        hour      => $d[3],
+        minute    => $d[4],
+        second    => $d[5],
+        time_zone => 'UTC',
+    );
+}
+
 sub render {
     my ($tmpl, $data) = @_;
     my $out = "";
@@ -63,13 +74,30 @@ sub render {
 sub oai_provider {
     my ($path, %opts) = @_;
 
-    my $setting = plugin_setting;
+    my $setting = clone(plugin_setting);
 
-    $setting->{granularity} ||= "YYYY-MM-DDThh:mm:ssZ";
+    $setting->{granularity} //= "YYYY-MM-DDThh:mm:ssZ";
+    $setting->{get_record_cql_pattern} //= '_id exact "%s"';
 
-    my $default_search_params = is_hash_ref($setting->{default_search_params})
-        ? $setting->{default_search_params}
-        : {};
+    if ($setting->{filter}) {
+        $setting->{cql_filter} = delete $setting->{filter};
+    }
+
+    $setting->{default_search_params} ||= {};
+
+    my $datestamp_parser;
+    if ($setting->{datestamp_pattern}) {
+        $datestamp_parser = DateTime::Format::Strptime->new(
+            pattern  => $setting->{datestamp_pattern},
+            on_error => 'undef',
+        );
+    }
+
+    my $format_datestamp = $datestamp_parser ? sub {
+        $datestamp_parser->parse_datetime($_[0])->iso8601.'Z';
+    } : sub {
+        $_[0];
+    };
 
     my $metadata_formats = do {
         my $list = $setting->{metadata_formats};
@@ -129,9 +157,9 @@ TT
          xsi:schemaLocation="http://www.openarchives.org/OAI/2.0/ http://www.openarchives.org/OAI/2.0/OAI-PMH.xsd">
 <responseDate>[% response_date %]</responseDate>
 [%- IF params.resumptionToken %]
-<request verb="[% params.verb %]" resumptionToken="[% params.resumptionToken %]">[% request_uri | xml %]</request>
+<request verb="[% params.verb %]" resumptionToken="[% params.resumptionToken %]">[% uri_base %]</request>
 [%- ELSE %]
-<request[% FOREACH param IN params %] [% param.key %]="[% param.value | xml %]"[% END %]>[% request_uri | xml %]</request>
+<request[% FOREACH param IN params %] [% param.key %]="[% param.value | xml %]"[% END %]>[% uri_base %]</request>
 [%- END %]
 TT
 
@@ -176,7 +204,7 @@ TT
 $template_header
 <Identify>
 <repositoryName>$setting->{repositoryName}</repositoryName>
-<baseURL>[% request_uri %]</baseURL>
+<baseURL>[% uri_base %]</baseURL>
 <protocolVersion>2.0</protocolVersion>
 <adminEmail>$setting->{adminEmail}</adminEmail>
 <earliestDatestamp>$setting->{earliestDatestamp}</earliestDatestamp>
@@ -277,6 +305,7 @@ TT
     my $bag = Catmandu->store($opts{store} || $setting->{store})->bag($opts{bag} || $setting->{bag});
 
     any ['get', 'post'] => $path => sub {
+        my $uri_base = $setting->{uri_base} // request->uri_base;
         my $response_date = DateTime->now->iso8601.'Z';
         my $params = request->is_get ? params('query') : params('body');
         my $errors = [];
@@ -284,7 +313,8 @@ TT
         my $set;
         my $verb = $params->{verb};
         my $vars = {
-            request_uri => request->uri_for($path),
+            uri_base => $uri_base,
+            request_uri => $uri_base . $path,
             response_date => $response_date,
             errors => $errors,
         };
@@ -367,28 +397,21 @@ TT
             my $id = $params->{identifier};
             $id =~ s/^$ns//;
 
+            my $rec = $bag->search(
+                %{ $setting->{default_search_params} },
+                cql_query => sprintf($setting->{get_record_cql_pattern}, $id),
+                start     => 0,
+                limit     => 1,
 
-            #use 'search' instead of 'get' to apply default_search_params (e.g. fq cannot be applied when using 'get')
-            my $rec = undef;
-            my $res = $bag->search(
+            )->first;
 
-                %{clone($default_search_params)},
-                query => "_id:\"$id\"",
-                start => 0,
-                limit => 1
-
-            );
-            if ($res->total) {
-                $rec = $res->first;
-            }
-
-            if ($rec) {
+            if (defined $rec) {
                 if ($fix) {
                     $rec = Catmandu->fixer($fix)->fix($rec);
                 }
 
                 $vars->{id} = $id;
-                $vars->{datestamp} = $rec->{$setting->{datestamp_field}};
+                $vars->{datestamp} = $format_datestamp->($rec->{$setting->{datestamp_field}});
                 $vars->{deleted} = $sub_deleted->($rec);
                 $vars->{setSpec} = $sub_set_specs_for->($rec);
                 my $metadata = "";
@@ -434,42 +457,50 @@ TT
                 return render(\$template_error, $vars);
             }
 
-            if ($from && length($from) > 10) {
-                substr $from, 10, 1, " ";
-                substr $from, 19, 1, "";
-            } elsif ($from) {
-                $from = "$from 00:00:00";
+            if ($from && length($from) == 10) {
+                $from = "${from}T00:00:00Z";
             }
-            if ($until && length($until) > 10) {
-                substr $until, 10, 1, " ";
-                substr $until, 19, 1, "";
-            } elsif ($until) {
-                $until = "$until 00:00:00";
+            if ($until && length($until) == 10) {
+                $until = "${until}T00:00:00Z";
             }
 
             my @cql;
+            my $cql_from  = $from;
+            my $cql_until = $until;
+            if (my $pattern = $setting->{datestamp_pattern}) {
+                $cql_from  = DateTime::Format::Strptime::strftime($pattern, parse_oai_datestamp($cql_from))  if $cql_from;
+                $cql_until = DateTime::Format::Strptime::strftime($pattern, parse_oai_datestamp($cql_until)) if $cql_until;
+            }
 
-            push @cql, "($setting->{filter})"                        if $setting->{filter};
-            push @cql, "($set->{cql})"                               if $set && $set->{cql};
-            push @cql, "($setting->{datestamp_field} >= \"$from\")"  if $from;
-            push @cql, "($setting->{datestamp_field} <= \"$until\")" if $until;
+            push @cql, qq|($setting->{cql_filter})|                      if $setting->{cql_filter};
+            push @cql, qq|($set->{cql})|                                 if $set && $set->{cql};
+            push @cql, qq|($setting->{datestamp_field} >= "$cql_from")|  if $cql_from;
+            push @cql, qq|($setting->{datestamp_field} <= "$cql_until")| if $cql_until;
             unless (@cql) {
                 push @cql, "(cql.allRecords)";
             }
 
-            my $search = $bag->search(%{clone($default_search_params)},cql_query => join(' AND ', @cql), limit => $limit, start => $start);
+            my $search = $bag->search(
+                %{ $setting->{default_search_params} },
+                cql_query => join(' and ', @cql),
+                limit     => $limit,
+                start     => $start,
+            );
+
             unless ($search->total) {
                 push @$errors, [noRecordsMatch => "no records found"];
                 return render(\$template_error, $vars);
             }
+
             if ($start + $limit < $search->total) {
                 $vars->{token} = join '!',
                     $params->{set} || '',
-                    $from ? _combined_utc_datestamp($from) : '',
-                    $until ? _combined_utc_datestamp($until) : '',
+                    $from ? $from : '',
+                    $until ? $until : '',
                     $params->{metadataPrefix},
                     $start + $limit;
             }
+
             $vars->{total} = $search->total;
 
             if ($verb eq 'ListIdentifiers') {
@@ -479,10 +510,10 @@ TT
                         $rec = Catmandu->fixer($fix)->fix($rec);
                     }
                     {
-                        id => $rec->{_id},
-                        datestamp => $rec->{$setting->{datestamp_field}},
-                        deleted => $sub_deleted->($rec),
-                        setSpec => $sub_set_specs_for->($rec),
+                        id        => $rec->{_id},
+                        datestamp => $format_datestamp->($rec->{$setting->{datestamp_field}}),
+                        deleted   => $sub_deleted->($rec),
+                        setSpec   => $sub_set_specs_for->($rec),
                     };
                 } @{$search->hits}];
                 return render(\$template_list_identifiers, $vars);
@@ -500,18 +531,18 @@ TT
                         $metadata = "";
                         my $exporter = Catmandu::Exporter::Template->new(
                             template => $format->{template},
-                            file => \$metadata,
-                            fix => $format->{fix},
+                            file     => \$metadata,
+                            fix      => $format->{fix},
                         );
                         $exporter->add($rec);
                         $exporter->commit;
                     }
                     {
-                        id => $rec->{_id},
-                        datestamp => $rec->{$setting->{datestamp_field}},
-                        deleted => $deleted,
-                        setSpec => $sub_set_specs_for->($rec),
-                        metadata => $metadata,
+                        id        => $rec->{_id},
+                        datestamp => $format_datestamp->($rec->{$setting->{datestamp_field}}),
+                        deleted   => $deleted,
+                        setSpec   => $sub_set_specs_for->($rec),
+                        metadata  => $metadata,
                     };
                 } @{$search->hits}];
                 return render(\$template_list_records, $vars);
@@ -533,26 +564,72 @@ TT
     }
 };
 
-sub _combined_utc_datestamp {
-    my $date = $_[0];
-    if ($date) {
-        $date = "${date}T00:00:00" unless length($date) > 10;
-        $date = "${date}:00"       unless length($date) > 16;
-        substr $date, 10, 1, "T";
-        substr $date, 19, 1, "Z";
-    }
-    $date;
-}
-
 register oai_provider => \&oai_provider;
 
 register_plugin;
 
 1;
 
+=head1 SYNOPSIS
+
+    use Dancer;
+    use Dancer::Plugin::Catmandu::SRU;
+
+    oai_provider '/oai';
+
+
+=head1 CONFIGURATION
+
+    plugins:
+        'Catmandu::OAI':
+            store: oai
+            bag: publication
+            datestamp_field: date_updated
+            datestamp_pattern: "%Y-%H-%M %H:%M:%S"
+            repositoryName: "My OAI Service Provider"
+            uri_base: "http://oai.service.com/oai"
+            adminEmail: me@example.com
+            earliestDatestamp: "1970-01-01T00:00:01Z"
+            deletedRecord: persistent
+            repositoryIdentifier: oai.service.com
+            limit: 200
+            delimiter: ":"
+            sampleIdentifier: "oai:oai.service.com:1585315"
+            cql_filter: 'status exact public'
+            get_record_cql_pattern: 'id exact "%s"'
+            metadata_formats:
+                -
+                    metadataPrefix: oai_dc
+                    schema: "http://www.openarchives.org/OAI/2.0/oai_dc.xsd"
+                    metadataNamespace: "http://www.openarchives.org/OAI/2.0/oai_dc/"
+                    template: views/oai_dc.tt
+                    fix:
+                      - publication_to_dc()
+                -
+                    metadataPrefix: mods
+                    schema: "http://www.loc.gov/standards/mods/v3/mods-3-0.xsd"
+                    metadataNamespace: "http://www.loc.gov/mods/v3"
+                    template: views/mods.tt
+                    filter: 'submissionstatus exact public'
+                    fix:
+                      - publication_to_mods()
+            sets:
+                -
+                    setSpec: openaccess
+                    setName: Open Access
+                    cql: 'oa=1'
+                -
+                    setSpec: journal_article
+                    setName: Journal article
+                    cql: 'documenttype exact journal_article'
+                -
+                    setSpec: book
+                    setName: Book
+                    cql: 'documenttype exact book'
+
 =head1 SEE ALSO
 
-L<Catmandu>
+L<Dancer::Plugin::Catmandu::SRU>, L<Catmandu>, L<Catmandu::Store>
 
 =head1 AUTHOR
 
@@ -562,10 +639,10 @@ Nicolas Steenlant, C<< <nicolas.steenlant at ugent.be> >>
 
 Nicolas Franck, C<< <nicolas.franck at ugent.be> >>
 
-=head1 LICENSE AND COPYRIGHT
+Vitali Peil, C<< <vitali.peil at uni-bielefeld.de> >>
 
-This program is free software; you can redistribute it and/or modify it
-under the terms of either: the GNU General Public License as published
-by the Free Software Foundation; or the Artistic License.
+=head1 LICENSE
 
-See http://dev.perl.org/licenses/ for more information.
+This library is free software; you can redistribute it and/or modify it under the same terms as Perl itself.
+
+=cut
